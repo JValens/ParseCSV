@@ -1,29 +1,67 @@
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.typesafe.config.ConfigFactory
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
+import org.jsoup.Jsoup
 
 case class InitialData(product_id: String, brand: String, product_name: String, short_description: String, lineage: String, long_description: String)
 
 case class ProcessedData(product_id: String, brand: String, product_name: String, short_description: String, lineage: String,
                          long_description: String, lineage_1: String, lineage_2: String, lineage_3: String, lineage_4: String, lineage_5: String,
-                         lineage_6: String, lineage_7: String, lineage_8: String)
+                         lineage_6: String, lineage_7: String, lineage_8: String, features: Map[String, String])
 
 object ProcessData {
-  def addHtmlTags(textToProcess: String, prependData: String, appendData: String): String = {
 
+  def processMap(textToProcess: String) : Map[String, String] = {
 
-    val p = Pattern.compile("<ul>(\\S+)</ul>")
-    val m = p.matcher(textToProcess)
+    val allChildText = Jsoup.parse(textToProcess).body().select("ul").html()
+    val childList = Jsoup.parse(allChildText).body().children().eachText().toArray().toList
 
-    if(m.find()) {
-      val group = m.group(1)
+    val mapToPrepare = childList map (t => {
+      val processString = t.toString
+      if(processString.contains(":")) {
+        val splitValues = processString.split(":")
+        splitValues(0).toString -> splitValues(1)
+      } else {
+        `processString` -> "true"
+      }
+    }) toMap
 
-      println("extractedData ==> " + group)
+/*
+    val processString = textToProcess
+    val getTagChildren = Jsoup.parse(processString).select("ul")
+
+    import scala.collection.JavaConversions._
+    var mapToPrepare: Map[String, String] = Map[String, String]()
+
+    import scala.collection.JavaConverters._
+    for(outerElements <- getTagChildren.asScala) {
+      val innerList = outerElements.children().asScala
+      for(innerElements <- innerList) {
+        val textToCheck = Jsoup.parse(innerElements.toString).text()
+        if(textToCheck.contains(":")) {
+          val splitedValues = textToCheck.split(":")
+          mapToPrepare + (splitedValues(0) -> splitedValues(1))
+        } else {
+          mapToPrepare + (`textToCheck` -> "true")
+        }
+      }
     }
-    prependData + textToProcess + appendData
+
+
+    val mapper = new ObjectMapper()
+    mapper.registerModule(DefaultScalaModule)
+*/
+
+    mapToPrepare
+  }
+
+  def processHTMLData(textToProcess: String, prependData: String, appendData: String): (String, Map[String, String]) = {
+    (prependData + textToProcess + appendData, processMap(textToProcess))
   }
 
   def getElement(list: List[String], index: Integer): String = {
@@ -96,12 +134,14 @@ class Operations {
     val preparedDF = initialDataFrame.as[InitialData].mapPartitions(partition => {
       val newPartition = partition.map(row => {
         val dataToAdd = ProcessData.processMapData(row.lineage, listSeparator)
-        ProcessedData(row.product_id, row.brand, row.product_name, row.short_description, row.lineage,
-          ProcessData.addHtmlTags(row.long_description, prependData, appendData)
-          , dataToAdd._1, dataToAdd._2, dataToAdd._3, dataToAdd._4, dataToAdd._5, dataToAdd._6, dataToAdd._7, dataToAdd._8)
+        val processedHTMLData = ProcessData.processHTMLData(row.long_description, prependData, appendData)
+        ProcessedData(row.product_id, row.brand, row.product_name, row.short_description, row.lineage, processedHTMLData._1
+          , dataToAdd._1, dataToAdd._2, dataToAdd._3, dataToAdd._4, dataToAdd._5, dataToAdd._6, dataToAdd._7, dataToAdd._8, processedHTMLData._2)
       })
       newPartition.toIterator
     })
+
+    preparedDF.show()
 
     import org.elasticsearch.spark.sql._
     preparedDF.saveToEs(elasticIndex + "/" + elasticType)
@@ -112,7 +152,6 @@ class Operations {
 object TestOperations {
   def main(args: Array[String]): Unit = {
     val startTime = System.currentTimeMillis()
-
     new Operations().performParsingOperation()
     val endTime = System.currentTimeMillis()
     println("start time ==> " + startTime)
